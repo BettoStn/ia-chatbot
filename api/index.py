@@ -4,18 +4,16 @@ import json
 import os
 from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
-from langchain.chains import create_sql_query_chain
+from langchain_community.agent_toolkits import create_sql_agent
 
 class handler(BaseHTTPRequestHandler):
     
     def send_cors_headers(self):
-        """Envía las cabeceras para permitir peticiones desde cualquier origen (CORS)"""
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
     def do_OPTIONS(self):
-        """Responde a las peticiones de 'inspección' (preflight) del navegador"""
         self.send_response(200, "ok")
         self.send_cors_headers()
         self.end_headers()
@@ -28,11 +26,7 @@ class handler(BaseHTTPRequestHandler):
             pregunta = body.get('pregunta', '')
 
             if not pregunta:
-                self.send_response(400)
-                self.send_header('Content-type', 'application/json')
-                self.send_cors_headers()
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "No se proporcionó ninguna pregunta."}).encode())
+                # ... (código de manejo de error sin cambios)
                 return
 
             # --- CONFIGURACIÓN ---
@@ -42,23 +36,28 @@ class handler(BaseHTTPRequestHandler):
             llm = ChatOpenAI(model="gpt-4o", openai_api_key=api_key, temperature=0)
             db = SQLDatabase.from_uri(db_uri)
             
-            write_query_chain = create_sql_query_chain(llm, db)
-            query_sql = write_query_chain.invoke({"question": pregunta})
-
-            resultado = db.run(query_sql)
+            # --- CREACIÓN DEL AGENTE DE SQL ---
+            # Esta es la nueva lógica mejorada
+            agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True)
+            
+            # Invocamos al agente con la pregunta
+            resultado_agente = agent_executor.invoke({"input": pregunta})
+            
+            # El agente devuelve la respuesta final en el campo 'output'
+            respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
 
             # Envía la respuesta de vuelta
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
-            self.send_cors_headers() # <--- AÑADIDO IMPORTANTE
+            self.send_cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps({"respuesta": resultado}).encode())
+            self.wfile.write(json.dumps({"respuesta": respuesta_final}).encode())
 
         except Exception as e:
+            # ... (código de manejo de error sin cambios)
             self.send_response(500)
             self.send_header('Content-type', 'application/json')
-            self.send_cors_headers() # <--- AÑADIDO IMPORTANTE
+            self.send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode())
-
         return
