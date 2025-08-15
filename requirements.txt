@@ -1,4 +1,4 @@
-langchain
+langchain-core
 langchain-community
 langchain-openai
 mysql-connector-python
