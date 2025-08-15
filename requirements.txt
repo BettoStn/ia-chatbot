@@ -1,0 +1,4 @@
+langchain
+langchain-openai
+mysql-connector-python
+sqlalchemy
