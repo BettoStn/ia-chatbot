@@ -1,5 +1,12 @@
-langchain-core
-langchain-community
-langchain-openai
-mysql-connector-python
-sqlalchemy
+# Core de LangChain, muy ligero
+langchain-core==0.1.52
+
+# Solo la parte de comunidad que necesitamos, versión específica
+langchain-community==0.0.38
+
+# Solo la parte de OpenAI
+langchain-openai==0.1.6
+
+# Conectores de base de datos
+mysql-connector-python==8.3.0
+SQLAlchemy==2.0.29
