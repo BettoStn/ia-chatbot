@@ -1,12 +1,9 @@
-# Core de LangChain, muy ligero
+# El paquete principal que faltaba, con versión fija
+langchain==0.1.20
+
+# El resto de los paquetes que ya teníamos
 langchain-core==0.1.52
-
-# Solo la parte de comunidad que necesitamos, versión específica
 langchain-community==0.0.38
-
-# Solo la parte de OpenAI
 langchain-openai==0.1.6
-
-# Conectores de base de datos
 mysql-connector-python==8.3.0
 SQLAlchemy==2.0.29
