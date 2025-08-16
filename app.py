@@ -1,6 +1,5 @@
-# api/index.py
 from flask import Flask, request, jsonify
-from flask_cors import CORS # La librería se importa correctamente
+from flask_cors import CORS
 import os
 import base64
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -10,12 +9,17 @@ from langchain.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
-# Configuración del servidor Flask
 app = Flask(__name__)
-CORS(app) # **ESTA ES LA LÍNEA QUE FALTABA Y SOLUCIONA TODO**
+CORS(app)
 
-@app.route('/api', methods=['POST'])
+# --- CAMBIO IMPORTANTE: La ruta ahora es la raíz "/" ---
+@app.route('/', methods=['POST', 'OPTIONS'])
 def handle_query():
+    # El método OPTIONS se maneja automáticamente por Flask-Cors,
+    # pero lo añadimos para mayor claridad.
+    if request.method == 'OPTIONS':
+        return '', 204
+
     try:
         body = request.get_json()
         pregunta = body.get('pregunta', '')
@@ -23,14 +27,11 @@ def handle_query():
         if not pregunta:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
-        # --- CONFIGURACIÓN DE LA IA ---
+        # ... (El resto de la lógica de la IA no cambia) ...
         api_key = os.environ.get("GOOGLE_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
-
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
         db = SQLDatabase.from_uri(db_uri)
-        
-        # --- LÓGICA HÍBRIDA ---
         write_query = create_sql_query_chain(llm, db)
         raw_sql_output = write_query.invoke({"question": pregunta})
 
@@ -40,7 +41,7 @@ def handle_query():
             sql_query = raw_sql_output[select_pos:]
             if sql_query.strip().endswith("```"):
                 sql_query = sql_query.strip()[:-3].strip()
-
+        
         if not sql_query:
             respuesta_final = raw_sql_output
         else:
