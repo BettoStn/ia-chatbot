@@ -1,0 +1,11 @@
+# El paquete principal que faltaba, con versión fija
+langchain==0.1.20
+
+# Librerías de LangChain (la de comunidad sigue siendo necesaria)
+langchain-core==0.1.52
+langchain-community==0.0.38
+langchain-google-genai # <-- CAMBIO: De OpenAI a Google
+
+# Conectores de base de datos
+mysql-connector-python==8.3.0
+SQLAlchemy==2.0.29
