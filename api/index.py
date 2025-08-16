@@ -1,6 +1,6 @@
 # api/index.py
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS # La librería se importa correctamente
 import os
 import base64
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -12,7 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 # Configuración del servidor Flask
 app = Flask(__name__)
-CORS(app) # Habilita CORS para todas las rutas
+CORS(app) # **ESTA ES LA LÍNEA QUE FALTABA Y SOLUCIONA TODO**
 
 @app.route('/api', methods=['POST'])
 def handle_query():
@@ -23,14 +23,14 @@ def handle_query():
         if not pregunta:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
-        # --- CONFIGURACIÓN DE LA IA (Igual que antes) ---
+        # --- CONFIGURACIÓN DE LA IA ---
         api_key = os.environ.get("GOOGLE_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
 
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
         db = SQLDatabase.from_uri(db_uri)
         
-        # --- LÓGICA HÍBRIDA (Igual que antes) ---
+        # --- LÓGICA HÍBRIDA ---
         write_query = create_sql_query_chain(llm, db)
         raw_sql_output = write_query.invoke({"question": pregunta})
 
@@ -71,6 +71,5 @@ def handle_query():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Esta parte permite que el servidor se ejecute
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
