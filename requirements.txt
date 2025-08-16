@@ -1,7 +1,5 @@
-# Librerías de LangChain optimizadas
 langchain
+langchain-community
 langchain-google-genai
-
-# Conectores de base de datos
 mysql-connector-python
 SQLAlchemy
