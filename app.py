@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import re
+import base64
 from langchain_deepseek import ChatDeepSeek
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
@@ -10,10 +11,10 @@ from langchain_community.agent_toolkits import create_sql_agent
 app = Flask(__name__)
 CORS(app)
 
-# --- **GUARDIA DE SEGURIDAD FINAL Y DEFINITIVO** ---
+# --- **GUARDIA DE SEGURIDAD FINAL** ---
 def is_sql_safe(sql_query: str, user_empresa_id: int):
     """
-    Valida el SQL generado por la IA con reglas de seguridad estrictas e inquebrantables.
+    Valida el SQL generado por la IA con reglas de seguridad estrictas.
     Devuelve True si es seguro, False si no lo es.
     """
     lower_sql = sql_query.lower().strip()
@@ -30,18 +31,14 @@ def is_sql_safe(sql_query: str, user_empresa_id: int):
         return False
         
     # --- LÓGICA DE SEGURIDAD MULTI-EMPRESA REFORZADA ---
-
     # CASO ESPECIAL: La consulta es sobre la tabla 'empresas'
     if 'from empresas' in lower_sql:
-        # La consulta DEBE contener un filtro WHERE por el ID de la empresa del usuario.
-        # Esto previene consultas generales como "SELECT * FROM empresas".
         id_filter_pattern = re.compile(r"(?:empresas\.)?id\s*=\s*" + str(user_empresa_id))
         if not id_filter_pattern.search(lower_sql):
             print(f"SECURITY ALERT (BROAD QUERY ON 'empresas'): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
             return False
     
     # CASO GENERAL: La consulta es sobre cualquier otra tabla de negocio
-    # La consulta DEBE contener el filtro 'empresa_id = [id_del_usuario]'
     elif 'empresa_id' in lower_sql:
         empresa_filter_pattern = re.compile(r"empresa_id\s*=\s*" + str(user_empresa_id))
         if not empresa_filter_pattern.search(lower_sql):
@@ -71,7 +68,7 @@ def handle_query():
 
         empresa_id_match = re.search(r'empresa_id = (\d+)', prompt_completo)
         if not empresa_id_match:
-            return jsonify({"error": "Error de seguridad: No se pudo determinar el ID de la empresa."}), 400
+            return jsonify({"error": "Error de seguridad: ID de empresa no encontrado."}), 400
         user_empresa_id = int(empresa_id_match.group(1))
 
         api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -89,10 +86,32 @@ def handle_query():
             if tool_calls and hasattr(tool_calls[0], 'tool_input') and isinstance(tool_calls[0].tool_input, dict):
                  sql_query_generada = tool_calls[0].tool_input.get('query', "")
         
-        # --- Punto de Control del "Guardia de Seguridad" ---
-        if sql_query_generada and not is_sql_safe(sql_query_generada, user_empresa_id):
-             respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
+        # --- **PUNTO DE CONTROL FINAL (SEGURIDAD + REPORTES)** ---
+        if sql_query_generada:
+            # 1. Chequeo de Seguridad
+            if not is_sql_safe(sql_query_generada, user_empresa_id):
+                 respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
+            else:
+                # 2. Chequeo de Tamaño de Resultados
+                try:
+                    count_query = f"SELECT COUNT(*) FROM ({sql_query_generada}) as subquery"
+                    count_result = db.run(count_query)
+                    record_count = int("".join(filter(str.isdigit, count_result)))
+                except Exception:
+                    record_count = 0
+                
+                # Si son más de 20, genera el enlace de descarga
+                if record_count > 20:
+                    encoded_query = base64.b64encode(sql_query_generada.encode('utf-8')).decode('utf-8')
+                    download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}" # Asegúrate que este dominio sea el tuyo
+                    respuesta_final = (f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat.\n\n"
+                                     f"He preparado un reporte para que lo descargues directamente:\n\n"
+                                     f"📥 [**Descargar Reporte Completo en Excel**]({download_url})")
+                else:
+                    # Si son pocos, usa la respuesta normal del agente con la tabla
+                    respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
         else:
+             # Si no hubo SQL (fue una conversación), usa la respuesta normal
              respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
 
         return jsonify({"respuesta": respuesta_final})
