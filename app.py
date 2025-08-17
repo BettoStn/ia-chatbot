@@ -77,6 +77,7 @@ def handle_query():
         
         db = SQLDatabase.from_uri(db_uri, include_tables=['clientes', 'productos', 'facturas', 'gastos', 'empleados'], sample_rows_in_table_info=3)
         
+        # El agente limitará los resultados a 20 por defecto para el chat
         agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True, max_rows_to_display=20)
 
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
@@ -95,21 +96,18 @@ def handle_query():
                 respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
             else:
                 # 2. Chequeo de Tamaño de Resultados (usando la consulta SIN LIMIT)
+                # Quitamos la cláusula LIMIT que el agente pudo haber agregado
                 full_sql_query = re.sub(r'\s+LIMIT\s+\d+\s*$', '', sql_query_generada, flags=re.IGNORECASE)
                 
-                # 📌 CAMBIO CLAVE: Manejar el caso de una consulta vacía
+                # Manejamos los resultados para evitar errores si no se encuentra un número
                 try:
                     count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) as subquery")
                     record_count = int("".join(filter(str.isdigit, count_result)))
                 except (ValueError, TypeError):
-                    # Si la consulta de conteo falla o devuelve un valor no numérico,
-                    # asumimos que no hay resultados.
                     record_count = 0
 
-                # 📌 CAMBIO CLAVE: Si no hay resultados, le damos un mensaje claro a la IA
                 if record_count == 0:
                     respuesta_final = "No se encontraron resultados para esta consulta."
-                # Si son más de 20, genera el enlace de descarga
                 elif record_count > 20:
                     encoded_query = base64.b64encode(full_sql_query.encode('utf-8')).decode('utf-8')
                     download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}" 
@@ -117,11 +115,9 @@ def handle_query():
                                      f"He preparado un reporte para que lo descargues directamente:\n\n"
                                      f"📥 [**Descargar Reporte Completo en Excel**]({download_url})")
                 else:
-                    # Si son pocos, usa la respuesta normal del agente con la tabla
                     respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
         else:
-              # Si no hubo SQL (fue una conversación), usa la respuesta normal
-              respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
+            respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
 
         return jsonify({"respuesta": respuesta_final})
 
