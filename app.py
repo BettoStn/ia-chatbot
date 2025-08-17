@@ -3,7 +3,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import base64
-# Asegúrate de que el import sea de DeepSeek
 from langchain_deepseek import ChatDeepSeek
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
@@ -25,12 +24,12 @@ def handle_query():
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
         # --- CONFIGURACIÓN DE LA IA ---
-        # Buscamos la clave de API de DeepSeek
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
 
-        # Inicializamos el modelo de DeepSeek
-        llm = ChatDeepSeek(model="deepseek-chat", deepseek_api_key=api_key, temperature=0)
+        # --- **LÍNEA CORREGIDA** ---
+        # El parámetro correcto es 'api_key', no 'deepseek_api_key'.
+        llm = ChatDeepSeek(model="deepseek-chat", api_key=api_key, temperature=0)
         
         db = SQLDatabase.from_uri(db_uri)
         
