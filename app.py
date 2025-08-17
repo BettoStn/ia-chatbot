@@ -75,10 +75,8 @@ def handle_query():
         db_uri = os.environ.get("DATABASE_URI")
         llm = ChatDeepSeek(model="deepseek-chat", api_key=api_key, temperature=0)
         
-        # 📌 CAMBIO CLAVE: quitamos top_k de SQLDatabase y lo agregamos en create_sql_agent
         db = SQLDatabase.from_uri(db_uri, include_tables=['clientes', 'productos', 'facturas', 'gastos', 'empleados'], sample_rows_in_table_info=3)
         
-        # 📌 CAMBIO CLAVE: añadimos top_k=20 para que el agente genere una consulta limitada
         agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True, max_rows_to_display=20)
 
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
@@ -97,17 +95,22 @@ def handle_query():
                 respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
             else:
                 # 2. Chequeo de Tamaño de Resultados (usando la consulta SIN LIMIT)
-                # Eliminamos la cláusula LIMIT que pudo haber agregado el agente
                 full_sql_query = re.sub(r'\s+LIMIT\s+\d+\s*$', '', sql_query_generada, flags=re.IGNORECASE)
-                try:
-                    count_query = f"SELECT COUNT(*) FROM ({full_sql_query}) as subquery"
-                    count_result = db.run(count_query)
-                    record_count = int("".join(filter(str.isdigit, count_result)))
-                except Exception:
-                    record_count = 0
                 
+                # 📌 CAMBIO CLAVE: Manejar el caso de una consulta vacía
+                try:
+                    count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) as subquery")
+                    record_count = int("".join(filter(str.isdigit, count_result)))
+                except (ValueError, TypeError):
+                    # Si la consulta de conteo falla o devuelve un valor no numérico,
+                    # asumimos que no hay resultados.
+                    record_count = 0
+
+                # 📌 CAMBIO CLAVE: Si no hay resultados, le damos un mensaje claro a la IA
+                if record_count == 0:
+                    respuesta_final = "No se encontraron resultados para esta consulta."
                 # Si son más de 20, genera el enlace de descarga
-                if record_count > 20:
+                elif record_count > 20:
                     encoded_query = base64.b64encode(full_sql_query.encode('utf-8')).decode('utf-8')
                     download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}" 
                     respuesta_final = (f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat.\n\n"
