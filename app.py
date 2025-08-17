@@ -10,43 +10,63 @@ from langchain_community.agent_toolkits import create_sql_agent
 app = Flask(__name__)
 CORS(app)
 
-# --- **FINAL AND DEFINITIVE SECURITY GUARD** ---
-def is_sql_safe(sql_query: str, user_empresa_id: int):
+# --- **GUARDIA DE SEGURIDAD FINAL Y CORREGIDO** ---
+def validar_sql(sql_query: str, empresa_id: int):
     """
-    This function performs a strict, multi-layered security check on the AI-generated SQL.
-    Returns True if safe, False otherwise.
+    Valida el SQL generado por la IA con reglas de seguridad estrictas.
+    Devuelve True si es seguro, False si no lo es.
     """
     lower_sql = sql_query.lower().strip()
-    
-    # Layer 1: Deny any command that is not a SELECT statement.
+
+    # Regla 1: Solo permitir consultas SELECT.
     if not lower_sql.startswith('select'):
-        print(f"SECURITY ALERT: Blocked non-SELECT statement. User Empresa ID: {user_empresa_id}, Query: {sql_query}")
+        print(f"VALIDATION FAILED: Not a SELECT statement.")
         return False
 
-    # Layer 2: Deny any command containing dangerous keywords.
-    forbidden_keywords = ['update', 'delete', 'insert', 'drop', 'alter', 'truncate', 'grant', 'revoke', 'into', 'from users']
+    # Regla 2: Prohibir palabras clave peligrosas.
+    forbidden_keywords = ['update', 'delete', 'insert', 'drop', 'alter', 'truncate', 'grant', 'revoke']
     if any(keyword in lower_sql for keyword in forbidden_keywords):
-        print(f"SECURITY ALERT: Blocked forbidden keyword. User Empresa ID: {user_empresa_id}, Query: {sql_query}")
+        print(f"VALIDATION FAILED: Contains forbidden keywords.")
         return False
         
-    # Layer 3: Enforce multi-tenancy. Check for attempts to access other companies.
-    # This regex finds all instances of 'empresa_id = [number]'.
-    empresa_id_references = re.findall(r'empresa_id\s*=\s*(\d+)', lower_sql)
-    for found_id in empresa_id_references:
-        if int(found_id) != user_empresa_id:
-            print(f"SECURITY ALERT: Blocked attempt to access forbidden empresa_id={found_id}. User is {user_empresa_id}. Query: {sql_query}")
-            return False
-            
-    # Case for querying the 'empresas' table itself. It must only be for the user's own company.
+    # --- LÓGICA DE SEGURIDAD MEJORADA Y CORREGIDA ---
+
+    # CASO ESPECIAL: La consulta es sobre la tabla 'empresas'
     if 'from empresas' in lower_sql:
-        # This regex finds all instances of 'id = [number]' or 'empresas.id = [number]'.
-        id_references = re.findall(r"(?:empresas\.)?id\s*=\s*(\d+)", lower_sql)
-        for found_id in id_references:
-            if int(found_id) != user_empresa_id:
-                print(f"SECURITY ALERT: Blocked attempt to access forbidden empresas.id={found_id}. User is {user_empresa_id}. Query: {sql_query}")
+        # La consulta DEBE buscar por el 'id' de la empresa del usuario y NINGÚN OTRO.
+        # Buscamos patrones como "id = 9" o "empresas.id = 9"
+        id_filter_pattern = re.compile(r"(?:empresas\.)?id\s*=\s*(\d+)")
+        matches = id_filter_pattern.findall(lower_sql)
+        
+        # Debe haber exactamente un filtro por id
+        if len(matches) != 1:
+            print(f"VALIDATION FAILED: Invalid or missing ID filter on 'empresas' table.")
+            return False
+        
+        found_id = int(matches[0])
+
+        # El ID encontrado debe ser el del usuario que ha iniciado sesión
+        if found_id != empresa_id:
+            print(f"VALIDATION FAILED: Attempted to access forbidden empresa.id={found_id}.")
+            return False
+
+    # CASO GENERAL: La consulta es sobre cualquier otra tabla de negocio
+    else:
+        # La consulta DEBE contener el filtro del 'empresa_id' del usuario.
+        empresa_filter_pattern = re.compile(r"empresa_id\s*=\s*" + str(empresa_id))
+        if not empresa_filter_pattern.search(lower_sql):
+            print(f"VALIDATION FAILED: Missing correct empresa_id filter.")
+            return False
+
+        # Adicionalmente, verificamos que NO se intente filtrar por OTRO empresa_id.
+        all_empresa_ids = re.findall(r'empresa_id\s*=\s*(\d+)', lower_sql)
+        for eid in all_empresa_ids:
+            if int(eid) != empresa_id:
+                print(f"VALIDATION FAILED: Attempted to access forbidden empresa_id={eid}.")
                 return False
 
-    return True # If all checks pass, the query is deemed safe.
+    return True # Si pasa todas las reglas, la consulta es segura.
+
 
 @app.route('/', methods=['POST', 'OPTIONS'])
 def handle_query():
@@ -59,11 +79,10 @@ def handle_query():
         if not prompt_completo:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
-        # Extract the user's company ID from the prompt for the security check.
         empresa_id_match = re.search(r'empresa_id = (\d+)', prompt_completo)
         if not empresa_id_match:
-            return jsonify({"error": "Error de seguridad: ID de empresa no encontrado en la solicitud."}), 400
-        user_empresa_id = int(empresa_id_match.group(1))
+            return jsonify({"error": "Error de seguridad: No se pudo determinar el ID de la empresa."}), 400
+        empresa_id_from_prompt = int(empresa_id_match.group(1))
 
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
@@ -80,13 +99,10 @@ def handle_query():
             if tool_calls and hasattr(tool_calls[0], 'tool_input') and isinstance(tool_calls[0].tool_input, dict):
                  sql_query_generada = tool_calls[0].tool_input.get('query', "")
         
-        # --- **SECURITY CHECKPOINT** ---
-        # The AI's generated SQL is intercepted and validated here.
-        if sql_query_generada and not is_sql_safe(sql_query_generada, user_empresa_id):
-             # If validation fails, we override the AI's response with a denial message.
-             respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
+        # --- Punto de Control del "Guardia de Seguridad" ---
+        if sql_query_generada and not validar_sql(sql_query_generada, empresa_id_from_prompt):
+             respuesta_final = "Lo siento, no tengo permiso para realizar esa consulta."
         else:
-             # If validation passes, we use the AI's normal response.
              respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
 
         return jsonify({"respuesta": respuesta_final})
