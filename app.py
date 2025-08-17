@@ -76,11 +76,11 @@ def handle_query():
         db_uri = os.environ.get("DATABASE_URI")
         llm = ChatDeepSeek(model="deepseek-chat", api_key=api_key, temperature=0)
         
-        # 📌 Mantenemos la configuración de SQLDatabase como estaba
         db = SQLDatabase.from_uri(db_uri)
         
-        # 📌 El agente limitará los resultados a 20 por defecto para el chat
-        agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True, max_rows_to_display=20)
+        # 📌 CAMBIO CLAVE: Agrega top_k para traer todos los registros en el resultado del agente.
+        # Esto permite a tu lógica de Python decidir si mostrar la tabla o el enlace.
+        agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True, top_k=99999)
 
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
         
