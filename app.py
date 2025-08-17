@@ -74,12 +74,9 @@ def handle_query():
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
         llm = ChatDeepSeek(model="deepseek-chat", api_key=api_key, temperature=0)
+        db = SQLDatabase.from_uri(db_uri)
         
-        db = SQLDatabase.from_uri(db_uri, include_tables=['clientes', 'productos', 'facturas', 'gastos', 'empleados'], sample_rows_in_table_info=3)
-        
-        # El agente limitará los resultados a 20 por defecto para el chat
-        agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True, max_rows_to_display=20)
-
+        agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True)
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
         
         intermediate_steps = resultado_agente.get("intermediate_steps", [])
@@ -93,31 +90,29 @@ def handle_query():
         if sql_query_generada:
             # 1. Chequeo de Seguridad
             if not is_sql_safe(sql_query_generada, user_empresa_id):
-                respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
+                 respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
             else:
-                # 2. Chequeo de Tamaño de Resultados (usando la consulta SIN LIMIT)
-                # Quitamos la cláusula LIMIT que el agente pudo haber agregado
-                full_sql_query = re.sub(r'\s+LIMIT\s+\d+\s*$', '', sql_query_generada, flags=re.IGNORECASE)
-                
-                # Manejamos los resultados para evitar errores si no se encuentra un número
+                # 2. Chequeo de Tamaño de Resultados
                 try:
-                    count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) as subquery")
+                    count_query = f"SELECT COUNT(*) FROM ({sql_query_generada}) as subquery"
+                    count_result = db.run(count_query)
                     record_count = int("".join(filter(str.isdigit, count_result)))
-                except (ValueError, TypeError):
+                except Exception:
                     record_count = 0
-
-                if record_count == 0:
-                    respuesta_final = "No se encontraron resultados para esta consulta."
-                elif record_count > 20:
-                    encoded_query = base64.b64encode(full_sql_query.encode('utf-8')).decode('utf-8')
-                    download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}" 
+                
+                # Si son más de 20, genera el enlace de descarga
+                if record_count > 20:
+                    encoded_query = base64.b64encode(sql_query_generada.encode('utf-8')).decode('utf-8')
+                    download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}" # Asegúrate que este dominio sea el tuyo
                     respuesta_final = (f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat.\n\n"
                                      f"He preparado un reporte para que lo descargues directamente:\n\n"
                                      f"📥 [**Descargar Reporte Completo en Excel**]({download_url})")
                 else:
+                    # Si son pocos, usa la respuesta normal del agente con la tabla
                     respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
         else:
-            respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
+             # Si no hubo SQL (fue una conversación), usa la respuesta normal
+             respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
 
         return jsonify({"respuesta": respuesta_final})
 
