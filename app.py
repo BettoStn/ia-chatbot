@@ -74,7 +74,8 @@ def handle_query():
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
         llm = ChatDeepSeek(model="deepseek-chat", api_key=api_key, temperature=0)
-        db = SQLDatabase.from_uri(db_uri)
+        # 📌 CAMBIO CLAVE: Agregamos top_k para traer más registros
+        db = SQLDatabase.from_uri(db_uri, include_tables=['clientes', 'productos', 'facturas', 'gastos', 'empleados'], sample_rows_in_table_info=3, top_k=99999)
         
         agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True)
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
@@ -90,7 +91,7 @@ def handle_query():
         if sql_query_generada:
             # 1. Chequeo de Seguridad
             if not is_sql_safe(sql_query_generada, user_empresa_id):
-                 respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
+                respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
             else:
                 # 2. Chequeo de Tamaño de Resultados
                 try:
@@ -111,8 +112,8 @@ def handle_query():
                     # Si son pocos, usa la respuesta normal del agente con la tabla
                     respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
         else:
-             # Si no hubo SQL (fue una conversación), usa la respuesta normal
-             respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
+              # Si no hubo SQL (fue una conversación), usa la respuesta normal
+              respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
 
         return jsonify({"respuesta": respuesta_final})
 
