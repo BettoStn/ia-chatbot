@@ -10,42 +10,41 @@ from langchain_community.agent_toolkits import create_sql_agent
 app = Flask(__name__)
 CORS(app)
 
-# --- **GUARDIA DE SEGURIDAD FINAL Y DEFINITIVO** ---
+# --- GUARDIA DE SEGURIDAD ---
 def is_sql_safe(sql_query: str, user_empresa_id: int):
     lower_sql = sql_query.lower().strip()
 
-    # Regla 1: Solo permitir SELECT
+    # Solo SELECT
     if not lower_sql.startswith("select"):
-        print(f"SECURITY ALERT (NON-SELECT): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
+        print(f"SECURITY ALERT (NON-SELECT): User {user_empresa_id}, Query: {sql_query}")
         return False
 
-    # Regla 2: Palabras peligrosas
+    # Palabras peligrosas
     forbidden_keywords = ["update", "delete", "insert", "drop", "alter", "truncate", "grant", "revoke"]
     if any(keyword in lower_sql for keyword in forbidden_keywords):
-        print(f"SECURITY ALERT (FORBIDDEN KEYWORD): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
+        print(f"SECURITY ALERT (FORBIDDEN KEYWORD): User {user_empresa_id}, Query: {sql_query}")
         return False
 
-    # Multiempresa reforzado
+    # Multiempresa
     if "from empresas" in lower_sql:
         id_filter_pattern = re.compile(r"(?:empresas\.)?id\s*=\s*" + str(user_empresa_id))
         if not id_filter_pattern.search(lower_sql):
-            print(f"SECURITY ALERT (BROAD QUERY ON 'empresas'): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
+            print(f"SECURITY ALERT (BROAD QUERY ON 'empresas'): User {user_empresa_id}, Query: {sql_query}")
             return False
     elif "empresa_id" in lower_sql:
         empresa_filter_pattern = re.compile(r"empresa_id\s*=\s*" + str(user_empresa_id))
         if not empresa_filter_pattern.search(lower_sql):
-            print(f"SECURITY ALERT (MISSING/WRONG empresa_id): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
+            print(f"SECURITY ALERT (MISSING/WRONG empresa_id): User {user_empresa_id}, Query: {sql_query}")
             return False
 
     # Ningún otro ID de empresa
     all_empresa_ids = re.findall(r"empresa_id\s*=\s*(\d+)", lower_sql)
     for eid in all_empresa_ids:
         if int(eid) != user_empresa_id:
-            print(f"SECURITY ALERT (FORBIDDEN empresa_id={eid}): User is {user_empresa_id}, Query: {sql_query}")
+            print(f"SECURITY ALERT (FORBIDDEN empresa_id={eid}): User {user_empresa_id}, Query: {sql_query}")
             return False
 
     return True
-
 
 @app.route("/", methods=["POST", "OPTIONS"])
 def handle_query():
@@ -54,7 +53,6 @@ def handle_query():
     try:
         body = request.get_json()
         prompt_completo = body.get("pregunta", "")
-
         if not prompt_completo:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
@@ -66,7 +64,7 @@ def handle_query():
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
 
-        # ✅ LLM con mensaje de sistema en model_kwargs
+        # LLM DeepSeek con system prompt
         llm = ChatDeepSeek(
             model="deepseek-chat",
             api_key=api_key,
@@ -97,6 +95,7 @@ def handle_query():
 
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
 
+        # Obtener SQL generado
         intermediate_steps = resultado_agente.get("intermediate_steps", [])
         sql_query_generada = ""
         if intermediate_steps:
@@ -136,7 +135,6 @@ def handle_query():
     except Exception as e:
         print(f"Error en el servidor: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
