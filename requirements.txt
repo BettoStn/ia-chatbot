@@ -1,6 +1,6 @@
 Flask
 Flask-Cors
 langchain
-langchain-openai  # <-- Cambiado de langchain-community
+langchain-openai # Reemplazando a langchain-community
 mysql-connector-python
 SQLAlchemy
