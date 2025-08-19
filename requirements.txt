@@ -2,6 +2,6 @@ Flask
 Flask-Cors
 langchain
 langchain-openai
-langchain-community  # <-- Añade esta línea de nuevo
+langchain-community
 mysql-connector-python
 SQLAlchemy
