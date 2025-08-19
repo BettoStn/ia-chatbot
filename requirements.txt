@@ -2,6 +2,6 @@ Flask
 Flask-Cors
 langchain
 langchain-community
-langchain-deepseek
 mysql-connector-python
 SQLAlchemy
+openai
