@@ -1,4 +1,3 @@
-# app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -31,29 +30,27 @@ def is_sql_safe(sql_query: str, user_empresa_id: int):
         return False
         
     # --- LÓGICA DE SEGURIDAD MULTI-EMPRESA REFORZADA ---
-
-    # CASO ESPECIAL: La consulta es sobre la tabla 'empresas'
     if 'from empresas' in lower_sql:
+        # Caso especial: tabla empresas
         id_filter_pattern = re.compile(r"(?:empresas\.)?id\s*=\s*" + str(user_empresa_id))
         if not id_filter_pattern.search(lower_sql):
             print(f"SECURITY ALERT (BROAD QUERY ON 'empresas'): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
             return False
-    
-    # CASO GENERAL: La consulta es sobre cualquier otra tabla de negocio
     elif 'empresa_id' in lower_sql:
+        # Caso general: cualquier otra tabla
         empresa_filter_pattern = re.compile(r"empresa_id\s*=\s*" + str(user_empresa_id))
         if not empresa_filter_pattern.search(lower_sql):
             print(f"SECURITY ALERT (MISSING/WRONG empresa_id): User Empresa ID: {user_empresa_id}, Query: {sql_query}")
             return False
 
-    # Regla final: Verificamos que no se intente colar el ID de otra empresa en NINGÚN CASO
+    # Regla final: ningún ID de otra empresa
     all_empresa_ids = re.findall(r'empresa_id\s*=\s*(\d+)', lower_sql)
     for eid in all_empresa_ids:
         if int(eid) != user_empresa_id:
             print(f"SECURITY ALERT (FORBIDDEN empresa_id={eid}): User is {user_empresa_id}, Query: {sql_query}")
             return False
 
-    return True # Si pasa todas las reglas, la consulta es segura.
+    return True
 
 
 @app.route('/', methods=['POST', 'OPTIONS'])
@@ -74,13 +71,26 @@ def handle_query():
 
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
-        llm = ChatDeepSeek(model="deepseek-chat", api_key=api_key, temperature=0)
+
+        # LLM con system prompt fijo
+        llm = ChatDeepSeek(
+            model="deepseek-chat",
+            api_key=api_key,
+            temperature=0,
+            system_prompt="Eres 'Bodezy', un analista de datos experto. Responde SIEMPRE en español claro y conciso. "
+                          "Antes de responder, asegúrate de que la consulta SQL cumpla las reglas de seguridad multiempresa."
+        )
         
         db = SQLDatabase.from_uri(db_uri)
-        
-        # 📌 CAMBIO CLAVE: Agrega top_k para traer todos los registros en el resultado del agente.
-        # Esto permite a tu lógica de Python decidir si mostrar la tabla o el enlace.
-        agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True, top_k=99999)
+
+        # Agente SQL con top_k alto para traer todos los resultados
+        agent_executor = create_sql_agent(
+            llm,
+            db=db,
+            agent_type="openai-tools",
+            verbose=True,
+            agent_executor_kwargs={"top_k": 99999}
+        )
 
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
         
@@ -98,10 +108,7 @@ def handle_query():
                 respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
             else:
                 # 2. Chequeo de Tamaño de Resultados (usando la consulta SIN LIMIT)
-                # Quitamos la cláusula LIMIT que el agente pudo haber agregado
                 full_sql_query = re.sub(r'\s+LIMIT\s+\d+\s*$', '', sql_query_generada, flags=re.IGNORECASE)
-                
-                # Manejamos los resultados para evitar errores si no se encuentra un número
                 try:
                     count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) as subquery")
                     record_count = int("".join(filter(str.isdigit, count_result)))
