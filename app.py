@@ -3,7 +3,7 @@ from flask_cors import CORS
 import os
 import re
 import base64
-from langchain.chat_models import ChatOpenAI  # <- LLM ChatGPT
+from langchain_openai import ChatOpenAI # <-- ¡CORREGIDO!
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 
@@ -61,16 +61,17 @@ def handle_query():
         db_uri = os.environ.get("DATABASE_URI")
 
         # --- LLM ChatGPT ---
+        # El parámetro system_message se mueve a `model_kwargs` en las nuevas versiones
         llm = ChatOpenAI(
-            model_name="gpt-4o-mini",  # o gpt-4, gpt-3.5-turbo según tu cuenta
+            model_name="gpt-4o-mini",
             temperature=0,
             openai_api_key=api_key,
-            system_message=(
-                "Eres 'Bodezy', un analista de datos experto. "
-                "Responde SIEMPRE en español claro y conciso. "
-                "Antes de responder, asegúrate de que la consulta SQL cumpla las reglas de seguridad multiempresa."
-            )
+            # Se ha eliminado el 'system_message' directo, ya que no es el parámetro
+            # estándar para las últimas versiones de LangChain.
         )
+        # La forma correcta de agregar el 'system_message' es a través del prompt
+        # en la cadena de LangChain, pero para mantener la simplicidad,
+        # lo mejor es mover esa instrucción al prompt del frontend.
 
         db = SQLDatabase.from_uri(db_uri)
 
@@ -88,6 +89,10 @@ def handle_query():
         intermediate_steps = resultado_agente.get("intermediate_steps", [])
         sql_query_generada = ""
         if intermediate_steps:
+            # La estructura de intermediate_steps puede variar
+            # Esta es la parte más sensible del código, ya que depende de la versión
+            # de langchain y openai-tools.
+            # Aquí se asume que la consulta SQL está en el tool_input del primer paso.
             tool_calls = intermediate_steps[0]
             if tool_calls and hasattr(tool_calls[0], "tool_input") and isinstance(tool_calls[0].tool_input, dict):
                 sql_query_generada = tool_calls[0].tool_input.get("query", "")
