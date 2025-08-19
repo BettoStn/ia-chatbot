@@ -108,12 +108,21 @@ def handle_query():
             if tool_calls and hasattr(tool_calls[0], "tool_input") and isinstance(tool_calls[0].tool_input, dict):
                 sql_query_generada = tool_calls[0].tool_input.get("query", "")
 
-        # --- SEGURIDAD + REPORTES ---
+        # --- SEGURIDAD + LÓGICA DE EXPORTACIÓN ---
         if sql_query_generada:
             if not is_sql_safe(sql_query_generada, user_empresa_id):
-                respuesta_final = "Lo siento, la consulta solicitada no está permitida por razones de seguridad."
+                respuesta_final = {"respuesta": "Lo siento, la consulta solicitada no está permitida por razones de seguridad."}
             else:
                 full_sql_query = re.sub(r"\s+LIMIT\s+\d+\s*$", "", sql_query_generada, flags=re.IGNORECASE)
+                
+                # Definir palabras clave para detección de exportación masiva
+                export_keywords = ["todos", "completo", "exportar", "masiva", "listado", "descargar", "reporte de"]
+                
+                # Lógica para determinar si se debe sugerir la exportación
+                debe_exportar = False
+                if any(keyword in prompt_completo.lower() for keyword in export_keywords):
+                    debe_exportar = True
+                
                 try:
                     count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) as subquery")
                     record_count = int("".join(filter(str.isdigit, count_result)))
@@ -122,11 +131,10 @@ def handle_query():
 
                 if record_count == 0:
                     respuesta_final = {"respuesta": "No se encontraron resultados para esta consulta."}
-                elif record_count > 10:
-                    # CAMBIO CLAVE: Devolver el código SQL para que el frontend lo use.
+                elif debe_exportar or record_count > 10:
                     respuesta_final = {
                         "sql_code": full_sql_query,
-                        "message": f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat. \n\nTe proporciono el código SQL. Pégalo en el panel superior, haz clic en 'Consultar SQL' y genera tu reporte."
+                        "message": f"He encontrado **{record_count} registros**. Como tu consulta sugiere una exportación, te proporciono el código SQL. Pégalo en el panel superior, haz clic en 'Consultar SQL' y genera tu reporte."
                     }
                 else:
                     respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
