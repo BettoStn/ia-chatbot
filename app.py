@@ -49,6 +49,27 @@ def handle_query():
     try:
         body = request.get_json()
         prompt_completo = body.get("pregunta", "")
+        
+        # Nuevo bloque de código para manejar la ejecución directa de SQL
+        sql_query_directa = body.get("sql_query")
+        if sql_query_directa:
+            user_empresa_id = body.get("empresa_id")
+            if not user_empresa_id:
+                 return jsonify({"error": "Error de seguridad: No se pudo determinar el ID de la empresa."}), 400
+            
+            db_uri = os.environ.get("DATABASE_URI")
+            db = SQLDatabase.from_uri(db_uri)
+
+            if not is_sql_safe(sql_query_directa, user_empresa_id):
+                 return jsonify({"error": "La consulta solicitada no está permitida por razones de seguridad."}), 403
+
+            try:
+                results = db.run(sql_query_directa)
+                return jsonify({"results": results, "message": "Consulta ejecutada exitosamente."})
+            except Exception as e:
+                return jsonify({"error": f"Error al ejecutar la consulta: {str(e)}"}), 500
+
+
         if not prompt_completo:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
@@ -100,22 +121,19 @@ def handle_query():
                     record_count = 0
 
                 if record_count == 0:
-                    respuesta_final = "No se encontraron resultados para esta consulta."
-                elif record_count > 10:  # <--- CORREGIDO: Límite de 10
-                    encoded_query = base64.b64encode(full_sql_query.encode("utf-8")).decode("utf-8")
-                    download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}"
-                    
-                    # CAMBIO CLAVE: Devolver un objeto JSON estructurado
+                    respuesta_final = {"respuesta": "No se encontraron resultados para esta consulta."}
+                elif record_count > 10:
+                    # CAMBIO CLAVE: Devolver el código SQL para que el frontend lo use.
                     respuesta_final = {
-                        "mensaje": f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat.\n\nHe preparado un reporte para que lo descargues directamente.",
-                        "url_descarga": download_url
+                        "sql_code": full_sql_query,
+                        "message": f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat. \n\nTe proporciono el código SQL. Pégalo en el panel superior, haz clic en 'Consultar SQL' y genera tu reporte."
                     }
                 else:
-                    respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
+                    respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
         else:
-            respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
+            respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
 
-        return jsonify({"respuesta": respuesta_final})
+        return jsonify(respuesta_final)
 
     except Exception as e:
         print(f"Error en el servidor: {e}")
