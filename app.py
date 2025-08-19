@@ -3,7 +3,7 @@ from flask_cors import CORS
 import os
 import re
 import base64
-from langchain_openai import ChatOpenAI # <-- ¡CORREGIDO!
+from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 
@@ -61,17 +61,11 @@ def handle_query():
         db_uri = os.environ.get("DATABASE_URI")
 
         # --- LLM ChatGPT ---
-        # El parámetro system_message se mueve a `model_kwargs` en las nuevas versiones
         llm = ChatOpenAI(
             model_name="gpt-4o-mini",
             temperature=0,
             openai_api_key=api_key,
-            # Se ha eliminado el 'system_message' directo, ya que no es el parámetro
-            # estándar para las últimas versiones de LangChain.
         )
-        # La forma correcta de agregar el 'system_message' es a través del prompt
-        # en la cadena de LangChain, pero para mantener la simplicidad,
-        # lo mejor es mover esa instrucción al prompt del frontend.
 
         db = SQLDatabase.from_uri(db_uri)
 
@@ -89,10 +83,6 @@ def handle_query():
         intermediate_steps = resultado_agente.get("intermediate_steps", [])
         sql_query_generada = ""
         if intermediate_steps:
-            # La estructura de intermediate_steps puede variar
-            # Esta es la parte más sensible del código, ya que depende de la versión
-            # de langchain y openai-tools.
-            # Aquí se asume que la consulta SQL está en el tool_input del primer paso.
             tool_calls = intermediate_steps[0]
             if tool_calls and hasattr(tool_calls[0], "tool_input") and isinstance(tool_calls[0].tool_input, dict):
                 sql_query_generada = tool_calls[0].tool_input.get("query", "")
@@ -111,14 +101,15 @@ def handle_query():
 
                 if record_count == 0:
                     respuesta_final = "No se encontraron resultados para esta consulta."
-                elif record_count > 10:
+                elif record_count > 10:  # <--- CORREGIDO: Límite de 10
                     encoded_query = base64.b64encode(full_sql_query.encode("utf-8")).decode("utf-8")
                     download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}"
-                    respuesta_final = (
-                        f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat.\n\n"
-                        f"He preparado un reporte para que lo descargues directamente:\n\n"
-                        f"📥 [**Descargar Reporte Completo en Excel**]({download_url})"
-                    )
+                    
+                    # CAMBIO CLAVE: Devolver un objeto JSON estructurado
+                    respuesta_final = {
+                        "mensaje": f"He encontrado **{record_count} registros**, lo cual es mucho para mostrar en el chat.\n\nHe preparado un reporte para que lo descargues directamente.",
+                        "url_descarga": download_url
+                    }
                 else:
                     respuesta_final = resultado_agente.get("output", "No se pudo obtener una respuesta.")
         else:
