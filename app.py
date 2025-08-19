@@ -111,7 +111,7 @@ def handle_query():
 
                 if record_count == 0:
                     respuesta_final = "No se encontraron resultados para esta consulta."
-                elif record_count > 20:
+                elif record_count > 10:
                     encoded_query = base64.b64encode(full_sql_query.encode("utf-8")).decode("utf-8")
                     download_url = f"https://bodezy.com/vistas/exportar-reporte.php?query={encoded_query}"
                     respuesta_final = (
