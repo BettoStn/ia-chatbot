@@ -43,70 +43,98 @@ def is_sql_safe(sql_query: str, user_empresa_id: int):
 
 # --- Extractor robusto de SQL desde el resultado del agente ---
 def extract_sql_from_agent_result(result) -> str:
-    sql = ""
+    """
+    Intenta recuperar el SQL de:
+    - intermediate_steps: action.tool_input (dict o str), action.log (```sql ... ```), observation
+    - output final: bloque ```sql ... ``` o primer SELECT plausible
+    """
+    def first_select(text: str) -> str:
+        if not text:
+            return ""
+        m = re.search(r"```sql\s*(.*?)\s*```", text, flags=re.S | re.I)
+        if m:
+            cand = m.group(1).strip()
+            if cand.lower().startswith("select"):
+                return cand
+        m2 = re.search(r"(SELECT\s+[\s\S]+)", text, flags=re.I)
+        if m2:
+            cand = m2.group(1).strip()
+            cand = re.split(r"\n\s*```", cand)[0]
+            if cand.lower().startswith("select"):
+                return cand
+        return ""
 
-    # 1) Intentar desde intermediate_steps
+    # 1) intermediate_steps
     try:
-        steps = result.get("intermediate_steps", [])
+        steps = result.get("intermediate_steps", []) or []
         for step in steps:
-            # step suele ser (AgentAction, str_observation)
-            action = step[0] if isinstance(step, (list, tuple)) and step else None
-            if action is None:
-                continue
+            # step puede ser (AgentAction, observation_str) o dicts; seamos defensivos
+            action = None
+            observation = ""
+            if isinstance(step, (list, tuple)):
+                action = step[0] if len(step) > 0 else None
+                observation = step[1] if len(step) > 1 else ""
+            elif isinstance(step, dict):
+                action = step.get("action")
+                observation = step.get("observation", "")
 
-            tool_input = getattr(action, "tool_input", None)
-            # a) tool_input dict con 'query' o 'input'
-            if isinstance(tool_input, dict):
-                for k in ("query", "input"):
-                    v = tool_input.get(k)
-                    if isinstance(v, str) and v.strip().lower().startswith("select"):
-                        return v
+            # a) tool_input
+            if action is not None:
+                tool_input = getattr(action, "tool_input", None)
+                if isinstance(tool_input, dict):
+                    for k in ("query", "input"):
+                        v = tool_input.get(k)
+                        if isinstance(v, str) and v.strip().lower().startswith("select"):
+                            return v
+                if isinstance(tool_input, str) and tool_input.strip().lower().startswith("select"):
+                    return tool_input
 
-            # b) tool_input como cadena
-            if isinstance(tool_input, str) and tool_input.strip().lower().startswith("select"):
-                return tool_input
+                # b) action.log
+                action_log = getattr(action, "log", "") or ""
+                cand = first_select(action_log)
+                if cand:
+                    return cand
 
-            # c) bloque ```sql en el log
-            action_log = getattr(action, "log", "") or ""
-            m = re.search(r"```sql\s*(.*?)\s*```", action_log, flags=re.S | re.I)
-            if m:
-                candidate = m.group(1).strip()
-                if candidate.lower().startswith("select"):
-                    return candidate
-
-            # d) primer SELECT plausible en el log
-            m2 = re.search(r"(SELECT\s+[\s\S]+)", action_log, flags=re.I)
-            if m2:
-                candidate = m2.group(1).strip()
-                candidate = re.split(r"\n\s*```", candidate)[0]
-                if candidate.lower().startswith("select"):
-                    return candidate
+            # c) observation (a veces trae el bloque del SQL que se ejecutó)
+            if isinstance(observation, str):
+                cand = first_select(observation)
+                if cand:
+                    return cand
     except Exception:
         pass
 
-    # 2) Intentar desde output final (bloque ```sql)
+    # 2) output final
     try:
         out = result.get("output", "") or ""
-        m = re.search(r"```sql\s*(.*?)\s*```", out, flags=re.S | re.I)
-        if m:
-            candidate = m.group(1).strip()
-            if candidate.lower().startswith("select"):
-                return candidate
+        cand = first_select(out)
+        if cand:
+            return cand
     except Exception:
         pass
 
-    # 3) fallback: primer SELECT en output
-    try:
-        out = result.get("output", "") or ""
-        m = re.search(r"(SELECT\s+[\s\S]+)", out, flags=re.I)
-        if m:
-            candidate = m.group(1).strip()
-            candidate = re.split(r"\n\s*```", candidate)[0]
-            if candidate.lower().startswith("select"):
-                return candidate
-    except Exception:
-        pass
+    return ""
 
+
+def force_sql_only(llm: ChatOpenAI, prompt_usuario: str, empresa_id: int) -> str:
+    """
+    Fallback: cuando el extractor falla pero el usuario pidió explícitamente el SQL,
+    pedimos al LLM que devuelva SOLO una consulta SELECT válida y filtrada por empresa_id.
+    """
+    system = (
+        "Eres un asistente que SOLO devuelve una consulta SQL válida que comience con SELECT.\n"
+        "No devuelvas ningún texto explicativo, ni comentarios, ni bloques de markdown; únicamente la sentencia SQL.\n"
+        f"La consulta debe incluir un filtro exacto: empresa_id = {empresa_id}.\n"
+    )
+    # Pedimos reescribir la intención del usuario como SQL SELECT
+    content = (
+        f"{system}\n\n"
+        f"Intención del usuario: {prompt_usuario}\n"
+        "Devuelve SOLO la consulta (una línea o múltiples líneas) pero únicamente la sentencia SQL."
+    )
+    resp = llm.invoke(content)
+    sql = resp.content.strip()
+    # Limpiar si el modelo devolvió por error un bloque
+    sql = re.sub(r"^```sql\s*|\s*```$", "", sql, flags=re.I).strip()
     return sql
 
 
@@ -169,53 +197,54 @@ def handle_query():
         # --- Extraer SQL de forma robusta ---
         sql_query_generada = extract_sql_from_agent_result(resultado_agente)
 
-        # --- SEGURIDAD + LÓGICA DE RESPUESTA ---
+        # Palabras que indican que QUIERES el SQL literal
+        sql_intent_keywords = [
+            "sql", "consulta sql", "dame el sql", "dame la consulta",
+            "query", "código sql", "codigo sql", "genera el sql",
+            "exportar", "exportación", "todos", "completo", "listado", "descargar", "reporte de"
+        ]
+        lower_prompt = prompt_completo.lower()
+        quiere_sql = any(kw in lower_prompt for kw in sql_intent_keywords)
+
+        # Si falló el extractor pero el usuario pidió explícitamente el SQL, forzamos generación
+        if quiere_sql and not sql_query_generada:
+            sql_query_generada = force_sql_only(llm, prompt_completo, user_empresa_id)
+
+        # --- SEGURIDAD + RESPUESTA ---
         if sql_query_generada:
             if not is_sql_safe(sql_query_generada, user_empresa_id):
-                respuesta_final = {"respuesta": "Lo siento, la consulta solicitada no está permitida por razones de seguridad."}
+                return jsonify({"respuesta": "Lo siento, la consulta solicitada no está permitida por razones de seguridad."})
+
+            # quitar LIMIT final para exportar
+            full_sql_query = re.sub(r"\s+LIMIT\s+\d+\s*$", "", sql_query_generada, flags=re.IGNORECASE)
+
+            if quiere_sql:
+                # Mostrar SOLO el bloque SQL
+                return jsonify({
+                    "sql_code": full_sql_query,
+                    "message": f"```sql\n{full_sql_query}\n```"
+                })
+
+            # Si no pidió el SQL, decidir por tamaño
+            try:
+                count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) AS subquery")
+                record_count = int("".join(filter(str.isdigit, str(count_result))))
+            except Exception:
+                record_count = 0
+
+            if record_count == 0:
+                return jsonify({"respuesta": "No se encontraron resultados para esta consulta."})
+            elif record_count > 10:
+                # También SOLO el bloque SQL (sin textos extra)
+                return jsonify({
+                    "sql_code": full_sql_query,
+                    "message": f"```sql\n{full_sql_query}\n```"
+                })
             else:
-                # Quitar LIMIT final para exportar
-                full_sql_query = re.sub(r"\s+LIMIT\s+\d+\s*$", "", sql_query_generada, flags=re.IGNORECASE)
-
-                # Intención explícita de ver el SQL literal
-                sql_intent_keywords = [
-                    "sql", "consulta sql", "dame el sql", "dame la consulta",
-                    "query", "código sql", "codigo sql", "genera el sql",
-                    "exportar", "exportación", "todos", "completo", "listado", "descargar", "reporte de"
-                ]
-                lower_prompt = prompt_completo.lower()
-                quiere_sql = any(kw in lower_prompt for kw in sql_intent_keywords)
-
-                if quiere_sql:
-                    # Mostrar SOLO el bloque SQL
-                    respuesta_final = {
-                        "sql_code": full_sql_query,
-                        "message": f"```sql\n{full_sql_query}\n```"
-                    }
-                else:
-                    # (Opcional) contar resultados para decidir mostrar SQL si es grande
-                    try:
-                        count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) AS subquery")
-                        record_count = int("".join(filter(str.isdigit, str(count_result))))
-                    except Exception:
-                        record_count = 0
-
-                    if record_count == 0:
-                        respuesta_final = {"respuesta": "No se encontraron resultados para esta consulta."}
-                    elif record_count > 10:
-                        # También SOLO el bloque SQL (sin textos extra)
-                        respuesta_final = {
-                            "sql_code": full_sql_query,
-                            "message": f"```sql\n{full_sql_query}\n```"
-                        }
-                    else:
-                        # Respuesta conversacional normal del agente
-                        respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
+                return jsonify({"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")})
         else:
-            # Si no logramos extraer SQL, devolvemos el output del agente
-            respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
-
-        return jsonify(respuesta_final)
+            # Sin SQL extraíble ni intención explícita -> salida del agente
+            return jsonify({"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")})
 
     except Exception as e:
         print(f"Error en el servidor: {e}")
