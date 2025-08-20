@@ -12,19 +12,15 @@ CORS(app)
 # --- GUARDIA DE SEGURIDAD ---
 def is_sql_safe(sql_query: str, user_empresa_id: int):
     lower_sql = sql_query.lower().strip()
-
-    # Solo permitimos SELECT
     if not lower_sql.startswith("select"):
         print(f"SECURITY ALERT (NON-SELECT): User {user_empresa_id}, Query: {sql_query}")
         return False
 
-    # Palabras peligrosas
     forbidden_keywords = ["update", "delete", "insert", "drop", "alter", "truncate", "grant", "revoke"]
     if any(keyword in lower_sql for keyword in forbidden_keywords):
         print(f"SECURITY ALERT (FORBIDDEN KEYWORD): User {user_empresa_id}, Query: {sql_query}")
         return False
 
-    # Filtrado por empresa
     if "from empresas" in lower_sql:
         id_filter_pattern = re.compile(r"(?:empresas\.)?id\s*=\s*" + str(user_empresa_id))
         if not id_filter_pattern.search(lower_sql):
@@ -36,7 +32,6 @@ def is_sql_safe(sql_query: str, user_empresa_id: int):
             print(f"SECURITY ALERT (MISSING/WRONG empresa_id): User {user_empresa_id}, Query: {sql_query}")
             return False
 
-    # Evitar empresa_id de otros
     all_empresa_ids = re.findall(r"empresa_id\s*=\s*(\d+)", lower_sql)
     for eid in all_empresa_ids:
         if int(eid) != user_empresa_id:
@@ -44,6 +39,77 @@ def is_sql_safe(sql_query: str, user_empresa_id: int):
             return False
 
     return True
+
+
+# --- Extractor robusto de SQL desde el resultado del agente ---
+def extract_sql_from_agent_result(result) -> str:
+    sql = ""
+
+    # 1) Intentar desde intermediate_steps
+    try:
+        steps = result.get("intermediate_steps", [])
+        for step in steps:
+            # step suele ser (AgentAction, str_observation)
+            action = step[0] if isinstance(step, (list, tuple)) and step else None
+            if action is None:
+                continue
+
+            tool_input = getattr(action, "tool_input", None)
+            # a) tool_input dict con 'query'
+            if isinstance(tool_input, dict):
+                if "query" in tool_input and isinstance(tool_input["query"], str) and tool_input["query"].strip().lower().startswith("select"):
+                    return tool_input["query"]
+                if "input" in tool_input and isinstance(tool_input["input"], str) and tool_input["input"].strip().lower().startswith("select"):
+                    return tool_input["input"]
+
+            # b) tool_input como string
+            if isinstance(tool_input, str) and tool_input.strip().lower().startswith("select"):
+                return tool_input
+
+            # c) buscar en el log del action un bloque ```sql
+            action_log = getattr(action, "log", "")
+            m = re.search(r"```sql\s*(.*?)\s*```", action_log, flags=re.S | re.I)
+            if m:
+                candidate = m.group(1).strip()
+                if candidate.lower().startswith("select"):
+                    return candidate
+
+            # d) como último recurso, primer SELECT plausible dentro del log
+            m2 = re.search(r"(SELECT\s+[\s\S]+)", action_log, flags=re.I)
+            if m2:
+                candidate = m2.group(1).strip()
+                # cortar si trae cosas extra
+                candidate = re.split(r"\n\s*```", candidate)[0]
+                if candidate.lower().startswith("select"):
+                    return candidate
+    except Exception:
+        pass
+
+    # 2) Intentar desde output final (bloque ```sql)
+    try:
+        out = result.get("output", "")
+        m = re.search(r"```sql\s*(.*?)\s*```", out, flags=re.S | re.I)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate.lower().startswith("select"):
+                return candidate
+    except Exception:
+        pass
+
+    # 3) fallback: primer SELECT en output
+    try:
+        out = result.get("output", "")
+        m = re.search(r"(SELECT\s+[\s\S]+)", out, flags=re.I)
+        if m:
+            candidate = m.group(1).strip()
+            candidate = re.split(r"\n\s*```", candidate)[0]
+            if candidate.lower().startswith("select"):
+                return candidate
+    except Exception:
+        pass
+
+    return sql
+
 
 @app.route("/", methods=["POST", "OPTIONS"])
 def handle_query():
@@ -53,7 +119,7 @@ def handle_query():
         body = request.get_json() or {}
         prompt_completo = body.get("pregunta", "")
 
-        # --- Ejecución directa de SQL (desde el panel SQL del frontend) ---
+        # --- Ejecución directa de SQL ---
         sql_query_directa = body.get("sql_query")
         if sql_query_directa:
             user_empresa_id = body.get("empresa_id")
@@ -72,7 +138,7 @@ def handle_query():
             except Exception as e:
                 return jsonify({"error": f"Error al ejecutar la consulta: {str(e)}"}), 500
 
-        # --- Flujo normal vía lenguaje natural ---
+        # --- Flujo NL ---
         if not prompt_completo:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
@@ -84,13 +150,11 @@ def handle_query():
         api_key = os.environ.get("OPENAI_API_KEY")
         db_uri = os.environ.get("DATABASE_URI")
 
-        # --- LLM ---
         llm = ChatOpenAI(
             model_name="gpt-4o-mini",
             temperature=0,
             openai_api_key=api_key,
         )
-
         db = SQLDatabase.from_uri(db_uri)
 
         agent_executor = create_sql_agent(
@@ -103,41 +167,28 @@ def handle_query():
 
         resultado_agente = agent_executor.invoke({"input": prompt_completo})
 
-        # --- Obtener SQL generado de intermediate_steps (robusto) ---
-        sql_query_generada = ""
-        try:
-            intermediate_steps = resultado_agente.get("intermediate_steps", [])
-            # intermediate_steps suele ser lista de tuplas (AgentAction, str_observation)
-            # Intentamos encontrar la 1ª tool call con 'query'
-            for step in intermediate_steps:
-                if isinstance(step, (list, tuple)) and len(step) > 0:
-                    maybe_action = step[0]
-                    # LangChain AgentAction suele tener .tool_input
-                    tool_input = getattr(maybe_action, "tool_input", None)
-                    if isinstance(tool_input, dict) and "query" in tool_input:
-                        sql_query_generada = tool_input.get("query", "") or sql_query_generada
-                        if sql_query_generada:
-                            break
-        except Exception:
-            pass
+        # --- Extraer SQL de forma robusta ---
+        sql_query_generada = extract_sql_from_agent_result(resultado_agente)
 
-        # --- SEGURIDAD + LÓGICA DE EXPORTACIÓN ---
+        # --- SEGURIDAD + LÓGICA DE EXPORTACIÓN/SQL EN CHAT ---
         if sql_query_generada:
             if not is_sql_safe(sql_query_generada, user_empresa_id):
                 respuesta_final = {"respuesta": "Lo siento, la consulta solicitada no está permitida por razones de seguridad."}
             else:
-                # Quitamos LIMIT final para exportaciones
+                # quitar LIMIT final para exportar
                 full_sql_query = re.sub(r"\s+LIMIT\s+\d+\s*$", "", sql_query_generada, flags=re.IGNORECASE)
 
-                # Palabras clave para detectar intención de exportar masivo
-                export_keywords = ["todos", "completo", "exportar", "masiva", "listado", "descargar", "reporte de"]
+                # disparadores de intención de SQL explícito/exportación
+                export_keywords = [
+                    "todos", "completo", "exportar", "masiva", "listado", "descargar", "reporte de",
+                    "sql", "consulta sql", "dame el sql", "query", "código sql", "codigo sql"
+                ]
+                lower_prompt = prompt_completo.lower()
+                debe_exportar = any(kw in lower_prompt for kw in export_keywords)
 
-                debe_exportar = any(keyword in prompt_completo.lower() for keyword in export_keywords)
-
-                # Contar resultados de la subconsulta (seguro porque ya pasamos is_sql_safe)
+                # contar resultados
                 try:
                     count_result = db.run(f"SELECT COUNT(*) FROM ({full_sql_query}) AS subquery")
-                    # db.run suele devolver string con filas; extraemos dígitos
                     record_count = int("".join(filter(str.isdigit, str(count_result))))
                 except Exception:
                     record_count = 0
@@ -145,21 +196,20 @@ def handle_query():
                 if record_count == 0:
                     respuesta_final = {"respuesta": "No se encontraron resultados para esta consulta."}
                 elif debe_exportar or record_count > 10:
-                    # >>> Aquí incluimos el SQL dentro del mensaje en bloque Markdown <<<
                     respuesta_final = {
                         "sql_code": full_sql_query,
                         "message": (
                             f"He encontrado **{record_count} registros**. "
-                            "Como tu consulta sugiere una exportación, te proporciono el código SQL:\n\n"
+                            "Te proporciono el código SQL solicitado:\n\n"
                             f"```sql\n{full_sql_query}\n```"
-                            "\n\nPégalo en el panel superior y haz clic en **'Consultar SQL'** para generar tu reporte."
+                            "\n\nPégalo en el panel superior y pulsa **'Consultar SQL'** para exportar."
                         )
                     }
                 else:
-                    # Respuesta conversacional normal del agente
+                    # respuesta normal del agente cuando no es masivo ni explícito
                     respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
         else:
-            # Si no hubo SQL identificable, devolvemos el output del agente
+            # si no logramos extraer SQL, devolvemos el output del agente
             respuesta_final = {"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta.")}
 
         return jsonify(respuesta_final)
@@ -167,6 +217,7 @@ def handle_query():
     except Exception as e:
         print(f"Error en el servidor: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
