@@ -105,8 +105,8 @@ def handle_query():
         
         print("Paso 1: Inicializando LLM...")
         llm = ChatOpenAI(
-            # MEJORA: Usar gpt-4o para mejor calidad en SQL.
-            model_name="gpt-4o", 
+            # MEJORA: Usar gpt-5-nano para mejor calidad en SQL.
+            model_name="gpt-5-nano", 
             temperature=0,
             openai_api_key=OPENAI_API_KEY,
         )
