@@ -5,3 +5,4 @@ langchain-openai
 langchain-community
 mysql-connector-python
 SQLAlchemy
+openai
