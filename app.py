@@ -1,19 +1,19 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
-import re
+import os, re, json, sys, traceback
+
 from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits import create_sql_agent
-import sys
+from langchain_core.messages import SystemMessage, HumanMessage
 
 app = Flask(__name__)
 CORS(app)
 
-# --- VERIFICACIÓN INICIAL DE VARIABLES DE ENTORNO ---
-# Si falta alguna variable crítica, el servidor no iniciará y el log mostrará el error.
+# =========================
+#   CONFIG / ENTORNO
+# =========================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-DATABASE_URI = os.environ.get("DATABASE_URI")
+DATABASE_URI   = os.environ.get("DATABASE_URI")
 
 if not OPENAI_API_KEY:
     print("ERROR CRÍTICO: La variable de entorno OPENAI_API_KEY no está configurada.")
@@ -22,138 +22,176 @@ if not DATABASE_URI:
     print("ERROR CRÍTICO: La variable de entorno DATABASE_URI no está configurada.")
     sys.exit(1)
 
-# --- GUARDIA DE SEGURIDAD (Sin cambios, ya estaba bien) ---
-def is_sql_safe(sql_query: str, user_empresa_id: int):
-    # (Tu código de seguridad aquí... se mantiene igual)
-    lower_sql = sql_query.lower().strip()
-    if not lower_sql.startswith("select"):
-        print(f"SECURITY ALERT (NON-SELECT): User {user_empresa_id}, Query: {sql_query}")
+MAX_PREVIEW_ROWS = 1000
+EXPORT_KEYWORDS = [
+    "exportar", "descargar", "csv", "excel", "xlsx", "reporte de", "reporte",
+    "exportación", "export", "todos mis clientes", "ventas de este mes",
+    "todas las ventas", "listado completo", "dump"
+]
+
+# =========================
+#   GUARDIAS DE SEGURIDAD
+# =========================
+def is_sql_safe(sql_query: str, user_empresa_id: int) -> bool:
+    q = (sql_query or "").strip()
+    lower_sql = q.lower()
+    # Debe ser SELECT (o WITH ... SELECT)
+    if not re.match(r'^\s*(with\s+.*?select|select)\b', lower_sql, flags=re.S|re.I):
+        print(f"SECURITY ALERT (NON-SELECT): User {user_empresa_id}, Query: {q}")
         return False
-    forbidden_keywords = ["update", "delete", "insert", "drop", "alter", "truncate", "grant", "revoke"]
-    if any(keyword in lower_sql for keyword in forbidden_keywords):
-        print(f"SECURITY ALERT (FORBIDDEN KEYWORD): User {user_empresa_id}, Query: {sql_query}")
+    # Bloquear DDL/DML peligrosos
+    if re.search(r'\b(insert|update|delete|merge|alter|drop|truncate|create|grant|revoke)\b', lower_sql):
+        print(f"SECURITY ALERT (FORBIDDEN KEYWORD): User {user_empresa_id}, Query: {q}")
         return False
-    empresa_filter_pattern = re.compile(r"empresa_id\s*=\s*" + str(user_empresa_id))
-    if "empresa_id" in lower_sql and not empresa_filter_pattern.search(lower_sql):
-        print(f"SECURITY ALERT (MISSING/WRONG empresa_id): User {user_empresa_id}, Query: {sql_query}")
-        return False
-    all_empresa_ids_in_query = re.findall(r"empresa_id\s*=\s*(\d+)", lower_sql)
-    for eid in all_empresa_ids_in_query:
-        if int(eid) != user_empresa_id:
-            print(f"SECURITY ALERT (FORBIDDEN empresa_id={eid}): User {user_empresa_id}, Query: {sql_query}")
+    # Si aparece empresa_id, debe ser el mismo
+    if "empresa_id" in lower_sql:
+        all_ids = re.findall(r'empresa_id\s*=\s*(\d+)', lower_sql)
+        if any(int(eid) != user_empresa_id for eid in all_ids):
+            print(f"SECURITY ALERT (FORBIDDEN empresa_id in query): User {user_empresa_id}, Query: {q}")
             return False
     return True
 
-# --- EXTRACTOR DE SQL (Sin cambios) ---
-def extract_sql_from_agent_result(result) -> str:
-    # (Tu código de extracción aquí... se mantiene igual)
-    # Es una función muy robusta, está bien diseñada.
-    def first_select(text: str) -> str:
-        if not text: return ""
-        m = re.search(r"```sql\s*(.*?)\s*```", text, flags=re.S | re.I)
-        if m:
-            cand = m.group(1).strip()
-            if cand.lower().startswith("select"): return cand
-        m2 = re.search(r"(SELECT\s+[\s\S]+)", text, flags=re.I)
-        if m2:
-            cand = m2.group(1).strip()
-            cand = re.split(r"\n\s*```", cand)[0]
-            if cand.lower().startswith("select"): return cand
-        return ""
-    try:
-        steps = result.get("intermediate_steps", []) or []
-        for step in steps:
-            action, observation = None, ""
-            if isinstance(step, (list, tuple)):
-                action = step[0] if len(step) > 0 else None
-                observation = step[1] if len(step) > 1 else ""
-            if action:
-                tool_input = getattr(action, "tool_input", None)
-                if isinstance(tool_input, dict):
-                    for k in ("query", "input"):
-                        v = tool_input.get(k)
-                        if isinstance(v, str) and v.strip().lower().startswith("select"): return v
-                if isinstance(tool_input, str) and tool_input.strip().lower().startswith("select"): return tool_input
-                action_log = getattr(action, "log", "") or ""
-                cand = first_select(action_log)
-                if cand: return cand
-    except Exception: pass
-    try:
-        out = result.get("output", "") or ""
-        cand = first_select(out)
-        if cand: return cand
-    except Exception: pass
-    return ""
+def ensure_empresa_filter(sql: str, empresa_id: int) -> str:
+    """
+    Inyecta un filtro por empresa_id si no existe explícitamente.
+    - Si ya hay WHERE, agrega AND.
+    - Si no hay WHERE, crea uno antes de ORDER/GROUP/LIMIT o al final.
+    """
+    if "empresa_id" in sql.lower():
+        return sql
 
+    # Punto de inserción antes de ORDER/GROUP/LIMIT (si existen)
+    m = re.search(r'(?i)\b(order\s+by|group\s+by|limit)\b', sql)
+    clause = f" empresa_id = {empresa_id} "
+
+    if re.search(r'(?i)\bwhere\b', sql):
+        if m:
+            idx = m.start()
+            return sql[:idx] + f" AND {clause}" + sql[idx:]
+        return sql.rstrip() + f" AND {clause}"
+    else:
+        if m:
+            idx = m.start()
+            return sql[:idx] + f" WHERE {clause}" + sql[idx:]
+        return sql.rstrip().rstrip(';') + f" WHERE {clause};"
+
+def add_limit(sql: str, n: int) -> str:
+    if re.search(r'(?i)\blimit\b', sql):
+        return sql
+    sql = sql.rstrip().rstrip(';')
+    return f"{sql} LIMIT {n};"
+
+def looks_like_export_intent(prompt: str) -> bool:
+    p = (prompt or "").lower()
+    return any(kw in p for kw in EXPORT_KEYWORDS)
+
+# =========================
+#   PROMPTS
+# =========================
+SYSTEM_PROMPT = """Eres un generador de SQL para MariaDB.
+REGLAS:
+- Responde SOLO UN JSON con esta forma exacta: {"sql":"...", "mode":"preview|export", "notes":"..."}.
+- SOLO SELECT (o WITH ... SELECT). Prohibido DDL/DML: INSERT, UPDATE, DELETE, ALTER, DROP, TRUNCATE, CREATE, GRANT, REVOKE.
+- NUNCA devuelvas filas, resultados, tablas, CSV ni datos. SOLO genera el SQL.
+- Si el usuario quiere exportar/descargar/reporte masivo, usa "mode":"export" y NO añadas LIMIT.
+- En caso contrario usa "mode":"preview" y añade LIMIT {limit}.
+- Siempre filtra por empresa_id = {empresa_id} donde aplique.
+- Dialecto: MariaDB. Usa nombres de tablas y columnas tal cual.
+"""
+
+USER_TEMPLATE = """Esquema (resumen):
+{schema}
+
+Tarea del usuario:
+{pregunta}
+
+Recuerda: responde SOLO un JSON válido con llaves {{}}, sin texto extra afuera.
+"""
+
+# =========================
+#   ENDPOINT
+# =========================
 @app.route("/", methods=["POST", "OPTIONS"])
 def handle_query():
     if request.method == "OPTIONS":
         return "", 204
     try:
         body = request.get_json() or {}
-        prompt_completo = body.get("pregunta", "")
+        prompt_completo = (body.get("pregunta") or "").strip()
 
         if not prompt_completo:
             return jsonify({"error": "No se proporcionó ninguna pregunta."}), 400
 
-        print(f"Recibida pregunta: {prompt_completo[:100]}...")
+        print(f"[INFO] Pregunta: {prompt_completo[:160]}...")
 
-        empresa_id_match = re.search(r"empresa_id\s*=\s*(\d+)", prompt_completo)
+        empresa_id_match = re.search(r"empresa_id\s*=\s*(\d+)", prompt_completo, flags=re.I)
         if not empresa_id_match:
-            return jsonify({"error": "Error de seguridad: No se pudo determinar el ID de la empresa en el prompt."}), 400
+            return jsonify({"error": "Error de seguridad: No se pudo determinar el ID de la empresa en el prompt (empresa_id=...)."}), 400
         user_empresa_id = int(empresa_id_match.group(1))
-        
-        print("Paso 1: Inicializando LLM...")
+
+        # Modelo por defecto: gpt-5-mini (mejor balance costo/inteligencia para SQL)
         llm = ChatOpenAI(
-            # MEJORA: Usar gpt-5-nano para mejor calidad en SQL.
-            model_name="gpt-5-nano", 
+            model_name="gpt-5-mini",
             temperature=0,
             openai_api_key=OPENAI_API_KEY,
+            max_tokens=350  # evita salidas largas
         )
-        
-        print("Paso 2: Conectando a la base de datos...")
+
+        # Solo para dar contexto mínimo del esquema (no ejecuta SELECT masivos)
         db = SQLDatabase.from_uri(DATABASE_URI)
+        schema_text = db.get_table_info()
+        # Opcional: recortar esquema si es muy grande para reducir costo
+        if len(schema_text) > 12000:
+            schema_text = schema_text[:12000] + "\n-- [Schema truncado para brevedad]"
 
-        print("Paso 3: Creando el agente SQL...")
-        agent_executor = create_sql_agent(
-            llm,
-            db=db,
-            agent_type="openai-tools",
-            verbose=True,
-        )
+        # Construir mensajes
+        sys_msg = SystemMessage(content=SYSTEM_PROMPT.format(
+            limit=MAX_PREVIEW_ROWS,
+            empresa_id=user_empresa_id
+        ))
+        user_msg = HumanMessage(content=USER_TEMPLATE.format(
+            schema=schema_text,
+            pregunta=prompt_completo
+        ))
 
-        print("Paso 4: Invocando el agente (puede tardar)...")
-        resultado_agente = agent_executor.invoke({"input": prompt_completo})
-        print("Paso 5: El agente finalizó la ejecución.")
+        # Invocar LLM
+        raw = llm.invoke([sys_msg, user_msg]).content or ""
+        # Tomar el primer bloque {...} como JSON
+        m = re.search(r'\{[\s\S]*\}', raw)
+        data = json.loads(m.group(0)) if m else {}
+        sql  = (data.get("sql") or "").strip()
+        mode = (data.get("mode") or "").strip().lower()
 
-        # --- Extracción y Lógica de Respuesta (Sin cambios, ya estaba bien) ---
-        sql_query_generada = extract_sql_from_agent_result(resultado_agente)
-        
-        if sql_query_generada:
-            print(f"SQL extraído: {sql_query_generada[:100]}...")
-            if not is_sql_safe(sql_query_generada, user_empresa_id):
-                return jsonify({"respuesta": "Lo siento, la consulta generada no está permitida por razones de seguridad."})
-            
-            # Si el usuario quiere exportar, devolvemos el SQL completo
-            sql_intent_keywords = ["exportar", "descargar", "reporte de", "todos mis clientes", "ventas de este mes"]
-            if any(kw in prompt_completo.lower() for kw in sql_intent_keywords):
-                print("Intención de exportación detectada. Devolviendo SQL.")
-                return jsonify({
-                    "sql_code": sql_query_generada,
-                    "message": f"Entendido. He preparado la consulta para que la exportes. Puedes ejecutarla desde el panel de la derecha.\n\n```sql\n{sql_query_generada}\n```"
-                })
-            
-            # Si no, devolvemos la respuesta del agente
-            print("Devolviendo respuesta conversacional del agente.")
-            return jsonify({"respuesta": resultado_agente.get("output", "No se pudo obtener una respuesta clara.")})
+        # Si el prompt sugiere exportación, forzamos export aunque el modelo no lo ponga
+        if looks_like_export_intent(prompt_completo):
+            mode = "export"
+
+        # Validación de SQL
+        if not sql:
+            return jsonify({"respuesta": "No pude generar una consulta SQL para tu pregunta."}), 400
+        if not is_sql_safe(sql, user_empresa_id):
+            return jsonify({"respuesta": "La consulta generada no está permitida por razones de seguridad."}), 400
+
+        # Forzar filtro por empresa_id si no está
+        sql = ensure_empresa_filter(sql, user_empresa_id)
+
+        # En preview: fuerza LIMIT 1000; en export: NO agregues LIMIT
+        if mode != "export":
+            sql = add_limit(sql, MAX_PREVIEW_ROWS)
+            return jsonify({
+                "sql_code": sql,
+                "mode": "preview",
+                "message": f"Vista previa (hasta {MAX_PREVIEW_ROWS} filas). Solo generé el SQL; ejecuta en tu backend."
+            })
         else:
-            print("No se pudo extraer SQL. Devolviendo respuesta directa del agente.")
-            return jsonify({"respuesta": resultado_agente.get("output", "No pude generar una consulta SQL para tu pregunta.")})
+            return jsonify({
+                "sql_code": sql,
+                "mode": "export",
+                "message": "SQL listo para exportar en TU servidor. Aquí no se devolvieron filas."
+            })
 
     except Exception as e:
-        # MEJORA: Imprime el error completo en el log de Render para una mejor depuración
         print(f"!!! ERROR INESPERADO EN EL SERVIDOR: {e}", file=sys.stderr)
-        import traceback
         traceback.print_exc()
         return jsonify({"error": "Ocurrió un error inesperado en el servidor al procesar la solicitud."}), 500
 
